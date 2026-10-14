@@ -1,0 +1,585 @@
+--- ../tak-kernel/tak-kernel/src/kernel.c	2026-10-03 19:13:06.537605938 +0000
++++ src/kernel.c	2026-10-03 19:14:06.219889228 +0000
+@@ -24,6 +24,7 @@
+ 
+ static size_t cursor_x;
+ static size_t cursor_y;
++static uint16_t terminal_cells[VGA_WIDTH * VGA_HEIGHT];
+ static uint8_t console_color = VGA_COLOR(COLOR_LIGHT_GREY, COLOR_BLACK);
+ static int gui_mode;
+ 
+@@ -115,6 +116,8 @@
+ }
+ 
+ static void vga_write_cell(size_t index, uint16_t value) {
++    if (index >= VGA_WIDTH * VGA_HEIGHT) return;
++    terminal_cells[index] = value;
+     if (!gui_mode && mouse_cursor_drawn && index == mouse_cell_index()) {
+         mouse_saved_cell = value;
+         return;
+@@ -126,9 +129,10 @@
+ static void clear_screen(void) {
+     mouse_erase_cursor();
+     for (size_t i = 0; i < VGA_WIDTH * VGA_HEIGHT; ++i) {
+-        VGA_MEMORY[i] = VGA_ENTRY(' ', console_color);
++        terminal_cells[i] = VGA_ENTRY(' ', console_color);
++        VGA_MEMORY[i] = terminal_cells[i];
+     }
+-    if (gui_mode) gui_clear_console();
++    if (gui_mode) gui_redraw_console(terminal_cells, VGA_WIDTH * VGA_HEIGHT);
+     cursor_x = 0;
+     cursor_y = 0;
+     mouse_draw_cursor();
+@@ -139,15 +143,18 @@
+     mouse_erase_cursor();
+     for (size_t row = 1; row < VGA_HEIGHT; ++row) {
+         for (size_t col = 0; col < VGA_WIDTH; ++col) {
+-            VGA_MEMORY[(row - 1) * VGA_WIDTH + col] =
+-                VGA_MEMORY[row * VGA_WIDTH + col];
++            terminal_cells[(row - 1) * VGA_WIDTH + col] =
++                terminal_cells[row * VGA_WIDTH + col];
+         }
+     }
+     for (size_t col = 0; col < VGA_WIDTH; ++col) {
+-        VGA_MEMORY[(VGA_HEIGHT - 1) * VGA_WIDTH + col] =
++        terminal_cells[(VGA_HEIGHT - 1) * VGA_WIDTH + col] =
+             VGA_ENTRY(' ', console_color);
+     }
+-    if (gui_mode) gui_redraw_console(VGA_MEMORY, VGA_WIDTH * VGA_HEIGHT);
++    for (size_t i = 0; i < VGA_WIDTH * VGA_HEIGHT; ++i) {
++        VGA_MEMORY[i] = terminal_cells[i];
++    }
++    if (gui_mode) gui_redraw_console(terminal_cells, VGA_WIDTH * VGA_HEIGHT);
+     cursor_y = VGA_HEIGHT - 1;
+     mouse_draw_cursor();
+ }
+--- ../tak-kernel/tak-kernel/src/gui.c	2026-10-03 19:13:06.527024909 +0000
++++ src/gui.c	2026-10-03 19:14:06.220039624 +0000
+@@ -1,263 +1,264 @@
+-#include "gui.h"
+-
+-#define GUI_COLS 80
+-#define GUI_ROWS 25
+-#define FB_TAG_TYPE 8
+-#define MB2_TAG_END 0
+-#define RGB_PIXEL 1
+-
+-static volatile uint8_t *fb;
+-static uint32_t fb_width;
+-static uint32_t fb_height;
+-static uint32_t fb_pitch;
+-static uint8_t fb_bpp;
+-static uint8_t red_pos, red_size, green_pos, green_size, blue_pos, blue_size;
+-static uint32_t cell_width, cell_height, console_x, console_y;
+-enum { POINTER_WIDTH = 24, POINTER_HEIGHT = 32, POINTER_SCALE = 2 };
+-static int pointer_x, pointer_y, pointer_drawn, pointer_initialized;
+-static uint32_t pointer_saved[POINTER_HEIGHT][POINTER_WIDTH];
+-static const uint16_t pointer_shape[POINTER_HEIGHT] = {
+-    0x800, 0xC00, 0xA00, 0x900, 0x880, 0x840, 0x820, 0x810,
+-    0x808, 0x808, 0x848, 0x890, 0xA20, 0xC40, 0x880, 0x070
+-};
+-static const uint32_t palette[16] = {
+-    0xFF000000, 0xFF0000AA, 0xFF00AA00, 0xFF00AAAA,
+-    0xFFAA0000, 0xFFAA00AA, 0xFFAA5500, 0xFFAAAAAA,
+-    0xFF555555, 0xFF5555FF, 0xFF55FF55, 0xFF55FFFF,
+-    0xFFFF5555, 0xFFFF55FF, 0xFFFFFF55, 0xFFFFFFFF
+-};
+-
+-/* Compact 5x7 uppercase font. Lowercase text is rendered as uppercase. */
+-static const uint8_t font_alpha[26][7] = {
+-    {14,17,17,31,17,17,17}, {30,17,17,30,17,17,30},
+-    {14,17,16,16,16,17,14}, {30,17,17,17,17,17,30},
+-    {31,16,16,30,16,16,31}, {31,16,16,30,16,16,16},
+-    {14,17,16,23,17,17,15}, {17,17,17,31,17,17,17},
+-    {14,4,4,4,4,4,14}, {7,2,2,2,18,18,12},
+-    {17,18,20,24,20,18,17}, {16,16,16,16,16,16,31},
+-    {17,27,21,21,17,17,17}, {17,25,21,19,17,17,17},
+-    {14,17,17,17,17,17,14}, {30,17,17,30,16,16,16},
+-    {14,17,17,17,21,18,13}, {30,17,17,30,20,18,17},
+-    {15,16,16,14,1,1,30}, {31,4,4,4,4,4,4},
+-    {17,17,17,17,17,17,14}, {17,17,17,17,17,10,4},
+-    {17,17,17,21,21,21,10}, {17,17,10,4,10,17,17},
+-    {17,17,10,4,4,4,4}, {31,1,2,4,8,16,31}
+-};
+-static const uint8_t font_digits[10][7] = {
+-    {14,17,19,21,25,17,14}, {4,12,4,4,4,4,14},
+-    {14,17,1,2,4,8,31}, {30,1,1,14,1,1,30},
+-    {2,6,10,18,31,2,2}, {31,16,16,30,1,1,30},
+-    {14,16,16,30,17,17,14}, {31,1,2,4,8,8,8},
+-    {14,17,17,14,17,17,14}, {14,17,17,15,1,1,14}
+-};
+-
+-static uint32_t scale_channel(uint8_t value, uint8_t bits) {
+-    if (bits == 0) return 0;
+-    const uint32_t max_value = (UINT32_C(1) << bits) - 1;
+-    return ((uint32_t)value * max_value + 127) / 255;
+-}
+-
+-static void put_pixel(uint32_t x, uint32_t y, uint32_t color) {
+-    if (x >= fb_width || y >= fb_height) return;
+-    const uint32_t r = scale_channel((uint8_t)(color >> 16), red_size);
+-    const uint32_t g = scale_channel((uint8_t)(color >> 8), green_size);
+-    const uint32_t b = scale_channel((uint8_t)color, blue_size);
+-    const uint32_t value = (r << red_pos) | (g << green_pos) | (b << blue_pos);
+-    volatile uint32_t *row = (volatile uint32_t *)(fb + (size_t)y * fb_pitch);
+-    row[x] = value;
+-}
+-
+-static uint32_t get_pixel(uint32_t x, uint32_t y) {
+-    const volatile uint32_t *row = (const volatile uint32_t *)(fb + (size_t)y * fb_pitch);
+-    return row[x];
+-}
+-
+-static void draw_pointer(void) {
+-    if (fb == NULL) return;
+-    if (pointer_x < 0) pointer_x = 0;
+-    if (pointer_y < 0) pointer_y = 0;
+-    if ((uint32_t)pointer_x + POINTER_WIDTH > fb_width) pointer_x = (int)(fb_width - POINTER_WIDTH);
+-    if ((uint32_t)pointer_y + POINTER_HEIGHT > fb_height) pointer_y = (int)(fb_height - POINTER_HEIGHT);
+-    for (uint32_t y = 0; y < POINTER_HEIGHT; ++y) {
+-        for (uint32_t x = 0; x < POINTER_WIDTH; ++x) {
+-            pointer_saved[y][x] = get_pixel((uint32_t)pointer_x + x, (uint32_t)pointer_y + y);
+-            const uint32_t source_x = x / POINTER_SCALE;
+-            const uint32_t source_y = y / POINTER_SCALE;
+-            const uint16_t bit = (uint16_t)(0x800u >> source_x);
+-            if ((pointer_shape[source_y] & bit) != 0)
+-                put_pixel((uint32_t)pointer_x + x, (uint32_t)pointer_y + y,
+-                          source_x == 0 ? 0xFF080808 : 0xFFFFFF00);
+-        }
+-    }
+-    pointer_drawn = 1;
+-}
+-
+-static void fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
+-    if (x >= fb_width || y >= fb_height) return;
+-    if (w > fb_width - x) w = fb_width - x;
+-    if (h > fb_height - y) h = fb_height - y;
+-    for (uint32_t py = y; py < y + h; ++py) {
+-        for (uint32_t px = x; px < x + w; ++px) put_pixel(px, py, color);
+-    }
+-}
+-
+-static void glyph_rows(char ch, uint8_t rows[7]) {
+-    if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
+-    if (ch >= 'A' && ch <= 'Z') {
+-        for (unsigned i = 0; i < 7; ++i) rows[i] = font_alpha[(unsigned)(ch - 'A')][i];
+-        return;
+-    }
+-    if (ch >= '0' && ch <= '9') {
+-        for (unsigned i = 0; i < 7; ++i) rows[i] = font_digits[(unsigned)(ch - '0')][i];
+-        return;
+-    }
+-    for (unsigned i = 0; i < 7; ++i) rows[i] = 0;
+-    switch (ch) {
+-        case '*': rows[0]=0; rows[1]=21; rows[2]=14; rows[3]=31; rows[4]=14; rows[5]=21; break;
+-        case '-': rows[3]=14; break;
+-        case '_': rows[6]=31; break;
+-        case '.': rows[6]=4; break;
+-        case ',': rows[5]=4; rows[6]=8; break;
+-        case ':': rows[2]=4; rows[5]=4; break;
+-        case ';': rows[2]=4; rows[5]=4; rows[6]=8; break;
+-        case '!': rows[0]=4; rows[1]=4; rows[2]=4; rows[3]=4; rows[6]=4; break;
+-        case '?': rows[0]=14; rows[1]=17; rows[2]=1; rows[3]=2; rows[4]=4; rows[6]=4; break;
+-        case '\'': rows[0]=4; rows[1]=4; rows[2]=2; break;
+-        case '"': rows[0]=10; rows[1]=10; break;
+-        case '/': rows[0]=1; rows[1]=2; rows[2]=2; rows[3]=4; rows[4]=8; rows[5]=8; rows[6]=16; break;
+-        case '\\': rows[0]=16; rows[1]=8; rows[2]=8; rows[3]=4; rows[4]=2; rows[5]=2; rows[6]=1; break;
+-        case '[': rows[0]=14; rows[1]=8; rows[2]=8; rows[3]=8; rows[4]=8; rows[5]=8; rows[6]=14; break;
+-        case ']': rows[0]=14; rows[1]=2; rows[2]=2; rows[3]=2; rows[4]=2; rows[5]=2; rows[6]=14; break;
+-        case '(': rows[0]=2; rows[1]=4; rows[2]=8; rows[3]=8; rows[4]=8; rows[5]=4; rows[6]=2; break;
+-        case ')': rows[0]=8; rows[1]=4; rows[2]=2; rows[3]=2; rows[4]=2; rows[5]=4; rows[6]=8; break;
+-        case '+': rows[2]=4; rows[3]=31; rows[4]=4; break;
+-        case '=': rows[2]=31; rows[4]=31; break;
+-        case '>': rows[0]=16; rows[1]=8; rows[2]=4; rows[3]=2; rows[4]=4; rows[5]=8; rows[6]=16; break;
+-        case '<': rows[0]=1; rows[1]=2; rows[2]=4; rows[3]=8; rows[4]=4; rows[5]=2; rows[6]=1; break;
+-        case '|': rows[0]=4; rows[1]=4; rows[2]=4; rows[3]=4; rows[4]=4; rows[5]=4; rows[6]=4; break;
+-        case '#': rows[0]=10; rows[1]=31; rows[2]=10; rows[3]=10; rows[4]=31; rows[5]=10; break;
+-        case '$': rows[0]=4; rows[1]=15; rows[2]=20; rows[3]=14; rows[4]=5; rows[5]=30; rows[6]=4; break;
+-        case ' ': break;
+-        default: rows[0]=31; rows[1]=17; rows[2]=1; rows[3]=6; rows[4]=4; rows[6]=4; break;
+-    }
+-}
+-
+-static void draw_glyph(uint32_t x, uint32_t y, char ch, uint32_t fg, uint32_t bg, uint32_t scale) {
+-    uint8_t rows[7];
+-    glyph_rows(ch, rows);
+-    fill_rect(x, y, 6 * scale, 8 * scale, bg);
+-    for (unsigned row = 0; row < 7; ++row) {
+-        for (unsigned col = 0; col < 5; ++col) {
+-            if ((rows[row] & (1u << (4 - col))) != 0)
+-                fill_rect(x + col * scale, y + row * scale, scale, scale, fg);
+-        }
+-    }
+-}
+-
+-static void draw_text(uint32_t x, uint32_t y, const char *text, uint32_t fg, uint32_t bg, uint32_t scale) {
+-    for (size_t i = 0; text[i] != '\0'; ++i)
+-        draw_glyph(x + (uint32_t)i * 6 * scale, y, text[i], fg, bg, scale);
+-}
+-
+-static uint32_t vga_color(uint8_t index) { return palette[index & 0x0F]; }
+-
+-int gui_initialize(const uint32_t *multiboot_info) {
+-    if (multiboot_info == NULL) return 0;
+-    const uint8_t *base = (const uint8_t *)multiboot_info;
+-    const uint32_t total_size = *(const uint32_t *)base;
+-    if (total_size < 16) return 0;
+-    uint32_t offset = 8;
+-    while (offset + 8 <= total_size) {
+-        const uint32_t *tag = (const uint32_t *)(base + offset);
+-        const uint32_t type = tag[0];
+-        const uint32_t size = tag[1];
+-        if (size < 8 || offset + size > total_size) return 0;
+-        if (type == MB2_TAG_END) break;
+-        if (type == FB_TAG_TYPE && size >= 38) {
+-            const uint8_t *data = base + offset;
+-            const uint64_t address = *(const uint64_t *)(data + 8);
+-            fb_pitch = *(const uint32_t *)(data + 16);
+-            fb_width = *(const uint32_t *)(data + 20);
+-            fb_height = *(const uint32_t *)(data + 24);
+-            fb_bpp = data[28];
+-            if (data[29] != RGB_PIXEL || fb_bpp != 32 || address >= UINT64_C(0x100000000)) return 0;
+-            red_pos=data[32]; red_size=data[33]; green_pos=data[34]; green_size=data[35]; blue_pos=data[36]; blue_size=data[37];
+-            if (fb_width < 640 || fb_height < 400 || fb_pitch < fb_width * 4 ||
+-                address + (uint64_t)fb_pitch * fb_height > UINT64_C(0x100000000)) return 0;
+-            fb = (volatile uint8_t *)(uintptr_t)address;
+-            cell_width = fb_width >= 960 ? 12 : 8;
+-            cell_height = fb_width >= 960 ? 18 : 12;
+-            console_x = fb_width >= 960 ? 32 : 24;
+-            console_y = fb_height >= 600 ? 132 : 92;
+-            fill_rect(0, 0, fb_width, fb_height, 0xFF111827);
+-            fill_rect(0, 0, fb_width, 42, 0xFF7F1D1D);
+-            draw_text(24, 12, "TAK", 0xFFFFFFFF, 0xFF7F1D1D, 2);
+-            draw_text(fb_width - 120, 15, "DESKTOP", 0xFFFFCCCC, 0xFF7F1D1D, 1);
+-            fill_rect(16, 64, fb_width - 32, fb_height - 80, 0xFF202938);
+-            fill_rect(16, 64, fb_width - 32, 34, 0xFFB91C1C);
+-            draw_text(32, 77, "TAK TERMINAL", 0xFFFFFFFF, 0xFFB91C1C, 1);
+-            fill_rect(16, fb_height - 24, fb_width - 32, 8, 0xFF7F1D1D);
+-            return 1;
+-        }
+-        offset = (offset + size + 7) & ~7u;
+-    }
+-    return 0;
+-}
+-
+-void gui_clear_console(void) {
+-    if (fb == NULL) return;
+-    const int redraw_pointer = pointer_drawn;
+-    if (redraw_pointer) gui_mouse_erase();
+-    fill_rect(console_x, console_y, GUI_COLS * cell_width,
+-              GUI_ROWS * cell_height, 0xFF202938);
+-    if (redraw_pointer) draw_pointer();
+-}
+-
+-void gui_draw_cell(size_t index, uint16_t cell) {
+-    if (fb == NULL || index >= GUI_COLS * GUI_ROWS) return;
+-    const uint32_t x = console_x + (uint32_t)(index % GUI_COLS) * cell_width;
+-    const uint32_t y = console_y + (uint32_t)(index / GUI_COLS) * cell_height;
+-    const uint8_t attributes = (uint8_t)(cell >> 8);
+-    const uint32_t fg = vga_color(attributes & 0x0F);
+-    const uint32_t bg = vga_color(attributes >> 4);
+-    const uint32_t scale = cell_width >= 12 ? 2 : 1;
+-    const int overlaps_pointer = pointer_drawn &&
+-        x < (uint32_t)pointer_x + POINTER_WIDTH && x + cell_width > (uint32_t)pointer_x &&
+-        y < (uint32_t)pointer_y + POINTER_HEIGHT && y + cell_height > (uint32_t)pointer_y;
+-    if (overlaps_pointer) gui_mouse_erase();
+-    draw_glyph(x, y, (char)(uint8_t)cell, fg, bg, scale);
+-    if (overlaps_pointer) draw_pointer();
+-}
+-
+-void gui_redraw_console(const volatile uint16_t *cells, size_t count) {
+-    if (fb == NULL) return;
+-    gui_clear_console();
+-    for (size_t i = 0; i < count && i < GUI_COLS * GUI_ROWS; ++i) gui_draw_cell(i, cells[i]);
+-}
+-
+-void gui_mouse_draw(void) {
+-    if (fb == NULL) return;
+-    if (!pointer_initialized) {
+-        pointer_x = (int)(fb_width / 2);
+-        pointer_y = (int)(fb_height / 2);
+-        pointer_initialized = 1;
+-    }
+-    if (!pointer_drawn) draw_pointer();
+-}
+-
+-void gui_mouse_erase(void) {
+-    if (!pointer_drawn || fb == NULL) return;
+-    for (uint32_t y = 0; y < POINTER_HEIGHT; ++y)
+-        for (uint32_t x = 0; x < POINTER_WIDTH; ++x)
+-            put_pixel((uint32_t)pointer_x + x, (uint32_t)pointer_y + y,
+-                      pointer_saved[y][x]);
+-    pointer_drawn = 0;
+-}
+-
+-void gui_mouse_move(int dx, int dy) {
+-    if (fb == NULL) return;
+-    gui_mouse_erase();
+-    pointer_x += dx;
+-    pointer_y += dy;
+-    draw_pointer();
+-}
++#include "gui.h"
++
++#define GUI_COLS 80
++#define GUI_ROWS 25
++#define FB_TAG_TYPE 8
++#define MB2_TAG_END 0
++#define RGB_PIXEL 1
++
++static volatile uint8_t *fb;
++static uint32_t fb_width;
++static uint32_t fb_height;
++static uint32_t fb_pitch;
++static uint8_t fb_bpp;
++static uint8_t red_pos, red_size, green_pos, green_size, blue_pos, blue_size;
++static uint32_t cell_width, cell_height, console_x, console_y;
++enum { POINTER_WIDTH = 24, POINTER_HEIGHT = 32, POINTER_SCALE = 2 };
++static int pointer_x, pointer_y, pointer_drawn, pointer_initialized;
++static uint32_t pointer_saved[POINTER_HEIGHT][POINTER_WIDTH];
++static const uint16_t pointer_shape[POINTER_HEIGHT] = {
++    0x800, 0xC00, 0xA00, 0x900, 0x880, 0x840, 0x820, 0x810,
++    0x808, 0x808, 0x848, 0x890, 0xA20, 0xC40, 0x880, 0x070
++};
++static const uint32_t palette[16] = {
++    0xFF000000, 0xFF0000AA, 0xFF00AA00, 0xFF00AAAA,
++    0xFFAA0000, 0xFFAA00AA, 0xFFAA5500, 0xFFAAAAAA,
++    0xFF555555, 0xFF5555FF, 0xFF55FF55, 0xFF55FFFF,
++    0xFFFF5555, 0xFFFF55FF, 0xFFFFFF55, 0xFFFFFFFF
++};
++
++/* Compact 5x7 uppercase font. Lowercase text is rendered as uppercase. */
++static const uint8_t font_alpha[26][7] = {
++    {14,17,17,31,17,17,17}, {30,17,17,30,17,17,30},
++    {14,17,16,16,16,17,14}, {30,17,17,17,17,17,30},
++    {31,16,16,30,16,16,31}, {31,16,16,30,16,16,16},
++    {14,17,16,23,17,17,15}, {17,17,17,31,17,17,17},
++    {14,4,4,4,4,4,14}, {7,2,2,2,18,18,12},
++    {17,18,20,24,20,18,17}, {16,16,16,16,16,16,31},
++    {17,27,21,21,17,17,17}, {17,25,21,19,17,17,17},
++    {14,17,17,17,17,17,14}, {30,17,17,30,16,16,16},
++    {14,17,17,17,21,18,13}, {30,17,17,30,20,18,17},
++    {15,16,16,14,1,1,30}, {31,4,4,4,4,4,4},
++    {17,17,17,17,17,17,14}, {17,17,17,17,17,10,4},
++    {17,17,17,21,21,21,10}, {17,17,10,4,10,17,17},
++    {17,17,10,4,4,4,4}, {31,1,2,4,8,16,31}
++};
++static const uint8_t font_digits[10][7] = {
++    {14,17,19,21,25,17,14}, {4,12,4,4,4,4,14},
++    {14,17,1,2,4,8,31}, {30,1,1,14,1,1,30},
++    {2,6,10,18,31,2,2}, {31,16,16,30,1,1,30},
++    {14,16,16,30,17,17,14}, {31,1,2,4,8,8,8},
++    {14,17,17,14,17,17,14}, {14,17,17,15,1,1,14}
++};
++
++static uint32_t scale_channel(uint8_t value, uint8_t bits) {
++    if (bits == 0) return 0;
++    const uint32_t max_value = (UINT32_C(1) << bits) - 1;
++    return ((uint32_t)value * max_value + 127) / 255;
++}
++
++static void put_pixel(uint32_t x, uint32_t y, uint32_t color) {
++    if (x >= fb_width || y >= fb_height) return;
++    const uint32_t r = scale_channel((uint8_t)(color >> 16), red_size);
++    const uint32_t g = scale_channel((uint8_t)(color >> 8), green_size);
++    const uint32_t b = scale_channel((uint8_t)color, blue_size);
++    const uint32_t value = (r << red_pos) | (g << green_pos) | (b << blue_pos);
++    volatile uint32_t *row = (volatile uint32_t *)(fb + (size_t)y * fb_pitch);
++    row[x] = value;
++}
++
++static uint32_t get_pixel(uint32_t x, uint32_t y) {
++    const volatile uint32_t *row = (const volatile uint32_t *)(fb + (size_t)y * fb_pitch);
++    return row[x];
++}
++
++static void draw_pointer(void) {
++    if (fb == NULL) return;
++    if (pointer_x < 0) pointer_x = 0;
++    if (pointer_y < 0) pointer_y = 0;
++    if ((uint32_t)pointer_x + POINTER_WIDTH > fb_width) pointer_x = (int)(fb_width - POINTER_WIDTH);
++    if ((uint32_t)pointer_y + POINTER_HEIGHT > fb_height) pointer_y = (int)(fb_height - POINTER_HEIGHT);
++    for (uint32_t y = 0; y < POINTER_HEIGHT; ++y) {
++        for (uint32_t x = 0; x < POINTER_WIDTH; ++x) {
++            pointer_saved[y][x] = get_pixel((uint32_t)pointer_x + x, (uint32_t)pointer_y + y);
++            const uint32_t source_x = x / POINTER_SCALE;
++            const uint32_t source_y = y / POINTER_SCALE;
++            const uint16_t bit = (uint16_t)(0x800u >> source_x);
++            if ((pointer_shape[source_y] & bit) != 0)
++                put_pixel((uint32_t)pointer_x + x, (uint32_t)pointer_y + y,
++                          source_x == 0 ? 0xFF080808 : 0xFFFFFF00);
++        }
++    }
++    pointer_drawn = 1;
++}
++
++static void fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
++    if (x >= fb_width || y >= fb_height) return;
++    if (w > fb_width - x) w = fb_width - x;
++    if (h > fb_height - y) h = fb_height - y;
++    for (uint32_t py = y; py < y + h; ++py) {
++        for (uint32_t px = x; px < x + w; ++px) put_pixel(px, py, color);
++    }
++}
++
++static void glyph_rows(char ch, uint8_t rows[7]) {
++    if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
++    if (ch >= 'A' && ch <= 'Z') {
++        for (unsigned i = 0; i < 7; ++i) rows[i] = font_alpha[(unsigned)(ch - 'A')][i];
++        return;
++    }
++    if (ch >= '0' && ch <= '9') {
++        for (unsigned i = 0; i < 7; ++i) rows[i] = font_digits[(unsigned)(ch - '0')][i];
++        return;
++    }
++    for (unsigned i = 0; i < 7; ++i) rows[i] = 0;
++    switch (ch) {
++        case '*': rows[0]=0; rows[1]=21; rows[2]=14; rows[3]=31; rows[4]=14; rows[5]=21; break;
++        case '-': rows[3]=14; break;
++        case '_': rows[6]=31; break;
++        case '.': rows[6]=4; break;
++        case ',': rows[5]=4; rows[6]=8; break;
++        case ':': rows[2]=4; rows[5]=4; break;
++        case ';': rows[2]=4; rows[5]=4; rows[6]=8; break;
++        case '!': rows[0]=4; rows[1]=4; rows[2]=4; rows[3]=4; rows[6]=4; break;
++        case '?': rows[0]=14; rows[1]=17; rows[2]=1; rows[3]=2; rows[4]=4; rows[6]=4; break;
++        case '\'': rows[0]=4; rows[1]=4; rows[2]=2; break;
++        case '"': rows[0]=10; rows[1]=10; break;
++        case '/': rows[0]=1; rows[1]=2; rows[2]=2; rows[3]=4; rows[4]=8; rows[5]=8; rows[6]=16; break;
++        case '\\': rows[0]=16; rows[1]=8; rows[2]=8; rows[3]=4; rows[4]=2; rows[5]=2; rows[6]=1; break;
++        case '[': rows[0]=14; rows[1]=8; rows[2]=8; rows[3]=8; rows[4]=8; rows[5]=8; rows[6]=14; break;
++        case ']': rows[0]=14; rows[1]=2; rows[2]=2; rows[3]=2; rows[4]=2; rows[5]=2; rows[6]=14; break;
++        case '(': rows[0]=2; rows[1]=4; rows[2]=8; rows[3]=8; rows[4]=8; rows[5]=4; rows[6]=2; break;
++        case ')': rows[0]=8; rows[1]=4; rows[2]=2; rows[3]=2; rows[4]=2; rows[5]=4; rows[6]=8; break;
++        case '+': rows[2]=4; rows[3]=31; rows[4]=4; break;
++        case '=': rows[2]=31; rows[4]=31; break;
++        case '>': rows[0]=16; rows[1]=8; rows[2]=4; rows[3]=2; rows[4]=4; rows[5]=8; rows[6]=16; break;
++        case '<': rows[0]=1; rows[1]=2; rows[2]=4; rows[3]=8; rows[4]=4; rows[5]=2; rows[6]=1; break;
++        case '|': rows[0]=4; rows[1]=4; rows[2]=4; rows[3]=4; rows[4]=4; rows[5]=4; rows[6]=4; break;
++        case '#': rows[0]=10; rows[1]=31; rows[2]=10; rows[3]=10; rows[4]=31; rows[5]=10; break;
++        case '$': rows[0]=4; rows[1]=15; rows[2]=20; rows[3]=14; rows[4]=5; rows[5]=30; rows[6]=4; break;
++        case ' ': break;
++        default: rows[0]=31; rows[1]=17; rows[2]=1; rows[3]=6; rows[4]=4; rows[6]=4; break;
++    }
++}
++
++static void draw_glyph(uint32_t x, uint32_t y, char ch, uint32_t fg, uint32_t bg, uint32_t scale) {
++    uint8_t rows[7];
++    glyph_rows(ch, rows);
++    fill_rect(x, y, 6 * scale, 8 * scale, bg);
++    for (unsigned row = 0; row < 7; ++row) {
++        for (unsigned col = 0; col < 5; ++col) {
++            if ((rows[row] & (1u << (4 - col))) != 0)
++                fill_rect(x + col * scale, y + row * scale, scale, scale, fg);
++        }
++    }
++}
++
++static void draw_text(uint32_t x, uint32_t y, const char *text, uint32_t fg, uint32_t bg, uint32_t scale) {
++    for (size_t i = 0; text[i] != '\0'; ++i)
++        draw_glyph(x + (uint32_t)i * 6 * scale, y, text[i], fg, bg, scale);
++}
++
++static uint32_t vga_color(uint8_t index) { return palette[index & 0x0F]; }
++
++int gui_initialize(const uint32_t *multiboot_info) {
++    if (multiboot_info == NULL) return 0;
++    const uint8_t *base = (const uint8_t *)multiboot_info;
++    const uint32_t total_size = *(const uint32_t *)base;
++    if (total_size < 16) return 0;
++    uint32_t offset = 8;
++    while (offset + 8 <= total_size) {
++        const uint32_t *tag = (const uint32_t *)(base + offset);
++        const uint32_t type = tag[0];
++        const uint32_t size = tag[1];
++        if (size < 8 || offset + size > total_size) return 0;
++        if (type == MB2_TAG_END) break;
++        if (type == FB_TAG_TYPE && size >= 38) {
++            const uint8_t *data = base + offset;
++            const uint64_t address = *(const uint64_t *)(data + 8);
++            fb_pitch = *(const uint32_t *)(data + 16);
++            fb_width = *(const uint32_t *)(data + 20);
++            fb_height = *(const uint32_t *)(data + 24);
++            fb_bpp = data[28];
++            if (data[29] != RGB_PIXEL || fb_bpp != 32 || address >= UINT64_C(0x100000000)) return 0;
++            red_pos=data[32]; red_size=data[33]; green_pos=data[34]; green_size=data[35]; blue_pos=data[36]; blue_size=data[37];
++            if (fb_width < 640 || fb_height < 400 || fb_pitch < fb_width * 4 ||
++                address + (uint64_t)fb_pitch * fb_height > UINT64_C(0x100000000)) return 0;
++            fb = (volatile uint8_t *)(uintptr_t)address;
++            cell_width = fb_width >= 960 ? 12 : 8;
++            cell_height = fb_width >= 960 ? 18 : 12;
++            console_x = fb_width >= 960 ? 32 : 24;
++            console_y = fb_height >= 600 ? 132 : 92;
++            fill_rect(0, 0, fb_width, fb_height, 0xFF111827);
++            fill_rect(0, 0, fb_width, 42, 0xFF7F1D1D);
++            draw_text(24, 12, "TAK", 0xFFFFFFFF, 0xFF7F1D1D, 2);
++            draw_text(fb_width - 120, 15, "DESKTOP", 0xFFFFCCCC, 0xFF7F1D1D, 1);
++            fill_rect(16, 64, fb_width - 32, fb_height - 80, 0xFF202938);
++            fill_rect(16, 64, fb_width - 32, 34, 0xFFB91C1C);
++            draw_text(32, 77, "TAK TERMINAL", 0xFFFFFFFF, 0xFFB91C1C, 1);
++            fill_rect(16, fb_height - 24, fb_width - 32, 8, 0xFF7F1D1D);
++            return 1;
++        }
++        offset = (offset + size + 7) & ~7u;
++    }
++    return 0;
++}
++
++void gui_clear_console(void) {
++    if (fb == NULL) return;
++    const int redraw_pointer = pointer_drawn;
++    if (redraw_pointer) gui_mouse_erase();
++    fill_rect(console_x, console_y, GUI_COLS * cell_width,
++              GUI_ROWS * cell_height, 0xFF202938);
++    if (redraw_pointer) draw_pointer();
++}
++
++void gui_draw_cell(size_t index, uint16_t cell) {
++    if (fb == NULL || index >= GUI_COLS * GUI_ROWS) return;
++    const uint32_t x = console_x + (uint32_t)(index % GUI_COLS) * cell_width;
++    const uint32_t y = console_y + (uint32_t)(index / GUI_COLS) * cell_height;
++    const uint8_t attributes = (uint8_t)(cell >> 8);
++    const uint32_t fg = vga_color(attributes & 0x0F);
++    const uint32_t bg = vga_color(attributes >> 4);
++    const uint32_t scale = cell_width >= 12 ? 2 : 1;
++    const int overlaps_pointer = pointer_drawn &&
++        x < (uint32_t)pointer_x + POINTER_WIDTH && x + cell_width > (uint32_t)pointer_x &&
++        y < (uint32_t)pointer_y + POINTER_HEIGHT && y + cell_height > (uint32_t)pointer_y;
++    if (overlaps_pointer) gui_mouse_erase();
++    fill_rect(x, y, cell_width, cell_height, bg);
++    draw_glyph(x, y, (char)(uint8_t)cell, fg, bg, scale);
++    if (overlaps_pointer) draw_pointer();
++}
++
++void gui_redraw_console(const volatile uint16_t *cells, size_t count) {
++    if (fb == NULL) return;
++    gui_clear_console();
++    for (size_t i = 0; i < count && i < GUI_COLS * GUI_ROWS; ++i) gui_draw_cell(i, cells[i]);
++}
++
++void gui_mouse_draw(void) {
++    if (fb == NULL) return;
++    if (!pointer_initialized) {
++        pointer_x = (int)(fb_width / 2);
++        pointer_y = (int)(fb_height / 2);
++        pointer_initialized = 1;
++    }
++    if (!pointer_drawn) draw_pointer();
++}
++
++void gui_mouse_erase(void) {
++    if (!pointer_drawn || fb == NULL) return;
++    for (uint32_t y = 0; y < POINTER_HEIGHT; ++y)
++        for (uint32_t x = 0; x < POINTER_WIDTH; ++x)
++            put_pixel((uint32_t)pointer_x + x, (uint32_t)pointer_y + y,
++                      pointer_saved[y][x]);
++    pointer_drawn = 0;
++}
++
++void gui_mouse_move(int dx, int dy) {
++    if (fb == NULL) return;
++    gui_mouse_erase();
++    pointer_x += dx;
++    pointer_y += dy;
++    draw_pointer();
++}
