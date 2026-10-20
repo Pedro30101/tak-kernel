@@ -1,10 +1,14 @@
 #include "tak.h"
 #include "vfs.h"
 #include "wm.h"
+#include "net.h"
+#include "netstack.h"
 
 #define MAXW 64
-#define MENUW 262
-#define ITEMH 34
+#define MENUW 296
+#define ITEMH 38
+#define MENU_HEAD 48
+#define MENU_PAD 12
 
 int tbpos;
 static int tbx, tby, tbw, tbh, dkx, dky, dkw, dkh, cpx, cpy, cpw, cph;
@@ -88,7 +92,7 @@ static int horiz(void) { return tbpos == 1 || tbpos == 3; }
 static void dirty_tb(void) { wm_dirty(tbx, tby, tbw, tbh); }
 
 static void menu_rect(int *x, int *y, int *w, int *h) {
-    int hh = nmenu * ITEMH + 16;
+    int hh = nmenu * ITEMH + MENU_HEAD + MENU_PAD * 2;
     *w = MENUW; *h = hh;
     switch (tbpos) {
     case 0: *x = tbx + tbw + 4; *y = 10; break;
@@ -166,9 +170,6 @@ static void default_wall(void) {
             u8 bits = gfont_row(t[i], r);
             for (int b = 0; b < 8; b++) if (bits & (0x80 >> b)) fill_a(wp, x0 + i * 8 * sc + b * sc, y0 + r * sc, sc, sc, 0xFFFFFF, 18);
         }
-    const char *v = "TAK Kernel " VER;
-    int vx = dkx + (dkw - (int)strlen(v) * 8) / 2;
-    text(wp, vx, y0 + 16 * sc + 14, v, 0x7F9CD9);
 }
 
 void wm_wallpaper(img *src) {
@@ -483,14 +484,14 @@ static void draw_win(win *w) {
     }
     int W = w->w + 2 * BD, H = w->h + TB + BD;
     if (w->x - 24 >= scr.cx1 || w->y - 24 >= scr.cy1 || w->x + W + 24 <= scr.cx0 || w->y + H + 28 <= scr.cy0) return;
-    int foc = w == focus, R = 14;
-    soft_shadow(&scr, w->x, w->y + 5, W, H, R, 22, foc ? 120 : 78);
-    u32 tint = foc ? 0x4C7FDB : 0x7F8AA0;
-    int ta = foc ? 100 : 84;
-    glass(&scr, w->x, w->y, W, TB, w->x, w->y, W, H, R, tint, ta, 7, foc ? 110 : 70);
-    glass(&scr, w->x, w->y + H - BD, W, BD, w->x, w->y, W, H, R, tint, ta, 7, 0);
-    glass(&scr, w->x, w->y + TB, BD, H - TB - BD, w->x, w->y, W, H, R, tint, ta, 7, 0);
-    glass(&scr, w->x + W - BD, w->y + TB, BD, H - TB - BD, w->x, w->y, W, H, R, tint, ta, 7, 0);
+    int foc = w == focus, R = 18;
+    soft_shadow(&scr, w->x, w->y + 6, W, H, R, 24, foc ? 112 : 68);
+    u32 tint = foc ? 0x5275A8 : 0x77849A;
+    int ta = foc ? 82 : 68;
+    glass(&scr, w->x, w->y, W, TB, w->x, w->y, W, H, R, tint, ta, 9, foc ? 82 : 54);
+    glass(&scr, w->x, w->y + H - BD, W, BD, w->x, w->y, W, H, R, tint, ta, 9, 0);
+    glass(&scr, w->x, w->y + TB, BD, H - TB - BD, w->x, w->y, W, H, R, tint, ta, 9, 0);
+    glass(&scr, w->x + W - BD, w->y + TB, BD, H - TB - BD, w->x, w->y, W, H, R, tint, ta, 9, 0);
     int maxc = (W - 190) / 8;
     int n = (int)strlen(w->title);
     if (n > maxc) n = maxc > 0 ? maxc : 0;
@@ -514,7 +515,7 @@ static void draw_win(win *w) {
     fill_a(&scr, w->x + BD - 1, w->y + TB + w->h, w->w + 2, 1, 0, 70);
     fill_a(&scr, w->x + BD - 1, w->y + TB, 1, w->h, 0, 90);
     fill_a(&scr, w->x + BD + w->w, w->y + TB, 1, w->h, 0, 90);
-    glass_edge(&scr, w->x, w->y, W, H, R, foc ? 230 : 150, foc ? 110 : 70);
+    glass_edge(&scr, w->x, w->y, W, H, R, foc ? 190 : 125, foc ? 82 : 50);
 }
 
 static void indicator(int x, int y, int on) {
@@ -571,21 +572,32 @@ static void draw_taskbar(void) {
 static void draw_menu(void) {
     int x, y, mw, h;
     menu_rect(&x, &y, &mw, &h);
-    if (x - 24 >= scr.cx1 || x + MENUW + 28 <= scr.cx0 || y - 24 >= scr.cy1 || y + h + 30 <= scr.cy0) return;
-    soft_shadow(&scr, x, y + 4, MENUW, h, 18, 24, 130);
-    glass(&scr, x, y, MENUW, h, x, y, MENUW, h, 18, 0x15244A, 128, 8, 60);
-    glass_edge(&scr, x, y, MENUW, h, 18, 210, 90);
-    int yy = y + 8;
+    if (x - 32 >= scr.cx1 || x + MENUW + 36 <= scr.cx0 || y - 32 >= scr.cy1 || y + h + 36 <= scr.cy0) return;
+    soft_shadow(&scr, x, y + 5, MENUW, h, 24, 28, 118);
+    glass(&scr, x, y, MENUW, h, x, y, MENUW, h, 24, 0x263754, 154, 10, 44);
+    glass_edge(&scr, x, y, MENUW, h, 24, 168, 54);
+
+    draw_icon(&scr, x + 18, y + 13, 28, 0xC81E3A, 'A', menu_open, 0, 1);
+    text(&scr, x + 58, y + 11, "Astros", C_WHITE);
+    text(&scr, x + 58, y + 27, "Applications", 0xCFD8EA);
+    fill_rr(&scr, x + MENUW - 42, y + 16, 24, 24, 12, 0xFFFFFF, 22);
+    for (int dot = 0; dot < 3; dot++)
+        fill_rr(&scr, x + MENUW - 35 + dot * 6, y + 26, 3, 3, 2, 0xE8EEFA, 210);
+    fill_a(&scr, x + 16, y + MENU_HEAD, MENUW - 32, 1, 0xFFFFFF, 45);
+
+    int yy = y + MENU_HEAD + MENU_PAD / 2;
     for (int i = 0; i < nmenu; i++) {
         struct mi *m = &menu[i];
-        if (m->act == 0) { hline(&scr, x + 16, yy + ITEMH / 2, MENUW - 32, 0x6C84B8); yy += ITEMH; continue; }
-        if (i == menu_hov) {
-            fill_rr(&scr, x + 8, yy + 1, MENUW - 16, ITEMH - 2, 10, 0xFFFFFF, 62);
-            glass_edge(&scr, x + 8, yy + 1, MENUW - 16, ITEMH - 2, 10, 170, 60);
+        if (m->act == 0) {
+            fill_a(&scr, x + 20, yy + ITEMH / 2, MENUW - 40, 1, 0xDCE7FB, 48);
+            yy += ITEMH;
+            continue;
         }
-        draw_icon(&scr, x + 16, yy + 5, 24, m->col, (u8)m->letter, i == menu_hov, 0, 1);
-        text(&scr, x + 51, yy + 10, m->label, 0x0A1224);
-        text(&scr, x + 50, yy + 9, m->label, C_WHITE);
+        if (i == menu_hov) {
+            fill_rr(&scr, x + 10, yy + 2, MENUW - 20, ITEMH - 4, 13, 0x8DB8FF, 92);
+        }
+        draw_icon(&scr, x + 19, yy + 7, 24, m->col, (u8)m->letter, i == menu_hov, 0, 1);
+        text(&scr, x + 57, yy + (ITEMH - 16) / 2, m->label, 0xF4F6FC);
         yy += ITEMH;
     }
 }
@@ -628,8 +640,10 @@ static int menu_at(int px, int py) {
     int x, y, w, h;
     menu_rect(&x, &y, &w, &h);
     if (!inside(px, py, x, y, w, h)) return -2;
-    int i = (py - y - 8) / ITEMH;
-    if (py - y - 8 < 0 || i < 0 || i >= nmenu) return -1;
+    int item_y = py - y - MENU_HEAD - MENU_PAD / 2;
+    if (item_y < 0) return -1;
+    int i = item_y / ITEMH;
+    if (i < 0 || i >= nmenu) return -1;
     return menu[i].act ? i : -1;
 }
 
@@ -846,6 +860,8 @@ void wm_run(void) {
     u64 last = 0, lastsec = 0;
     clock_update();
     for (;;) {
+        net_poll();
+        net_stack_poll();
         struct ev e;
         int any = 0;
         while (ev_pop(&e)) {

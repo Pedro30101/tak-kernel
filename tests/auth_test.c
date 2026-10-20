@@ -2,7 +2,7 @@
 #include <stdio.h>
 
 static struct fsops fake_ops;
-static node fake_disk, fake_auth_file;
+static node fake_disk, fake_auth_file, fake_home, fake_user_home;
 static u8 saved_record[sizeof(struct auth_record)];
 static int saved;
 
@@ -11,7 +11,23 @@ node *vfs_find(const char *path, node *cwd) {
     return !strcmp(path, AUTH_PATH) ? &fake_disk : NULL;
 }
 node *vfs_child(node *dir, const char *name) {
-    return dir == &fake_disk && !strcmp(name, AUTH_FILE) && saved ? &fake_auth_file : NULL;
+    if (dir == &fake_disk) {
+        if (!strcmp(name, AUTH_FILE) && saved) return &fake_auth_file;
+        if (!strcmp(name, "home") && fake_home.dir) return &fake_home;
+    }
+    if (dir == &fake_home && !strcmp(name, "astro_user") && fake_user_home.dir) return &fake_user_home;
+    return NULL;
+}
+node *vfs_mk(node *dir, const char *name, int isdir) {
+    node *created = NULL;
+    if (dir == &fake_disk && !strcmp(name, "home")) created = &fake_home;
+    else if (dir == &fake_home && !strcmp(name, "astro_user")) created = &fake_user_home;
+    if (!created || !isdir) return NULL;
+    memset(created, 0, sizeof *created);
+    snprintf(created->name, sizeof created->name, "%s", name);
+    created->dir = 1;
+    created->par = dir;
+    return created;
 }
 i64 vfs_rd(node *n, u64 off, void *buf, u64 len) {
     if (n != &fake_auth_file || off > sizeof saved_record || len > sizeof saved_record - off) return -1;
@@ -43,6 +59,9 @@ static int check_kdf(u32 rounds, const char *expected) {
 }
 
 int main(void) {
+    char long_password[AUTH_MAX_PASSWORD + 2];
+    memset(long_password, 'a', sizeof long_password - 1);
+    long_password[AUTH_MAX_PASSWORD] = 0;
     fake_disk.dir = 1;
     fake_disk.ops = &fake_ops;
     if (!check_kdf(1, "3267a06614b9d090bc3e684eebdb6af8ee753cf80b7f7f7cf5e676c65422d054") ||
@@ -52,8 +71,15 @@ int main(void) {
         return 1;
     }
     if (!valid_username("astro_user-1") || valid_username("../home") ||
-        valid_username(".") || valid_password("short") || !valid_password("a 12 character pass")) {
+        valid_username(".") || valid_password("ab") || !valid_password("abc") ||
+        !valid_password("a 12 character pass") || !valid_password(long_password)) {
         fputs("Account input validation test failed\n", stderr);
+        return 1;
+    }
+    long_password[AUTH_MAX_PASSWORD] = 'a';
+    long_password[AUTH_MAX_PASSWORD + 1] = 0;
+    if (valid_password(long_password)) {
+        fputs("Maximum password length validation test failed\n", stderr);
         return 1;
     }
     if (auth_init() != AUTH_SETUP ||
@@ -62,6 +88,10 @@ int main(void) {
         auth_verify("astro_user", "wrong password") == 0 ||
         auth_init() != AUTH_LOGIN) {
         fputs("Persistent account setup and login test failed\n", stderr);
+        return 1;
+    }
+    if (auth_home_dir() != &fake_user_home || strcmp(fake_user_home.name, "astro_user")) {
+        fputs("Per-account persistent home directory test failed\n", stderr);
         return 1;
     }
     auth_wipe(saved_record, sizeof saved_record);

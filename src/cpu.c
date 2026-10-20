@@ -19,14 +19,70 @@ struct gate {
 
 extern u64 isr_table[];
 extern u64 isr_table_n;
+extern void linux_syscall_entry(void);
 
 static u64 gdt[7] __attribute__((aligned(16)));
 static struct tss tss;
 static struct gate idt[256] __attribute__((aligned(16)));
 static void (*irqs[16])(void);
 volatile u64 ticks;
+volatile u64 syscall_kernel_rsp;
 
-void tss_rsp0(u64 sp) { tss.rsp0 = sp; }
+static void wrmsr(u32 msr, u64 value) {
+    u32 lo = (u32)value, hi = (u32)(value >> 32);
+    __asm__ volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
+}
+
+static u64 rdmsr(u32 msr) {
+    u32 lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return (u64)hi << 32 | lo;
+}
+
+void tss_rsp0(u64 sp) {
+    tss.rsp0 = sp;
+    syscall_kernel_rsp = sp;
+}
+
+void cpu_set_user_tls(u64 fs_base, u64 gs_base) {
+    wrmsr(0xC0000100, fs_base);
+    wrmsr(0xC0000101, gs_base);
+}
+
+void cpu_fxstate_init(void *state) {
+    u8 saved[512] __attribute__((aligned(16)));
+    u32 mxcsr = 0x1F80;
+    __asm__ volatile("fxsave64 %0" : "=m"(saved));
+    __asm__ volatile("fninit; ldmxcsr %0" : : "m"(mxcsr));
+    __asm__ volatile(
+        "pxor %%xmm0,%%xmm0; pxor %%xmm1,%%xmm1; "
+        "pxor %%xmm2,%%xmm2; pxor %%xmm3,%%xmm3; "
+        "pxor %%xmm4,%%xmm4; pxor %%xmm5,%%xmm5; "
+        "pxor %%xmm6,%%xmm6; pxor %%xmm7,%%xmm7; "
+        "pxor %%xmm8,%%xmm8; pxor %%xmm9,%%xmm9; "
+        "pxor %%xmm10,%%xmm10; pxor %%xmm11,%%xmm11; "
+        "pxor %%xmm12,%%xmm12; pxor %%xmm13,%%xmm13; "
+        "pxor %%xmm14,%%xmm14; pxor %%xmm15,%%xmm15"
+        : : : "memory");
+    __asm__ volatile("fxsave64 %0" : "=m"(*(u8 (*)[512])state));
+    __asm__ volatile("fxrstor64 %0" : : "m"(saved));
+}
+
+void cpu_fxstate_save(void *state) {
+    __asm__ volatile("fxsave64 %0" : "=m"(*(u8 (*)[512])state) : : "memory");
+}
+
+void cpu_fxstate_restore(const void *state) {
+    __asm__ volatile("fxrstor64 %0" : : "m"(*(const u8 (*)[512])state) : "memory");
+}
+
+void cpu_syscall_init(void) {
+    wrmsr(0xC0000080, rdmsr(0xC0000080) | 1);
+    wrmsr(0xC0000081, (0x13ULL << 48) | (0x08ULL << 32));
+    wrmsr(0xC0000082, (u64)linux_syscall_entry);
+    wrmsr(0xC0000084, (1ULL << 8) | (1ULL << 9) |
+                       (1ULL << 10) | (1ULL << 18));
+}
 u64 uptime_ms(void) { return ticks * 10; }
 void irq_set(int n, void (*fn)(void)) { irqs[n] = fn; }
 
@@ -57,6 +113,14 @@ static void pit_init(void) {
 }
 
 void cpu_init(void) {
+    u64 cr0, cr4;
+    __asm__ volatile("mov %%cr0,%0" : "=r"(cr0));
+    __asm__ volatile("mov %%cr4,%0" : "=r"(cr4));
+    cr0 = (cr0 | (1ULL << 1) | (1ULL << 5)) &
+          ~((1ULL << 2) | (1ULL << 3));
+    cr4 |= (1ULL << 9) | (1ULL << 10);
+    __asm__ volatile("mov %0,%%cr0" : : "r"(cr0) : "memory");
+    __asm__ volatile("mov %0,%%cr4" : : "r"(cr4) : "memory");
     gdt[0] = 0;
     gdt[1] = 0x00AF9A000000FFFFULL;
     gdt[2] = 0x00CF92000000FFFFULL;
@@ -79,6 +143,7 @@ void cpu_init(void) {
     }
     struct { u16 l; u64 b; } __attribute__((packed)) ip = { sizeof idt - 1, (u64)idt };
     __asm__ volatile("lidt %0" : : "m"(ip));
+    cpu_syscall_init();
     pic_init();
     pit_init();
 }

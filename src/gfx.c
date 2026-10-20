@@ -2,6 +2,8 @@
 #include "gfx.h"
 #include "font8x16.h"
 
+extern const u8 font_smooth_atlas[];
+
 int sw, sh, fbbpp;
 img scr;
 
@@ -98,10 +100,12 @@ int gfx_init(void) {
     sw = *(u32 *)(t + 20);
     sh = *(u32 *)(t + 24);
     fbbpp = t[28];
-    int type = t[29];
-    if (type != 1 || addr >= (1ULL << 32) || (fbbpp != 32 && fbbpp != 24 && fbbpp != 16)) return 0;
+    if ((fbbpp != 32 && fbbpp != 24 && fbbpp != 16)) return 0;
     rp = t[32]; rs = t[33]; gp = t[34]; gs = t[35]; bp = t[36]; bs = t[37];
-    fb = (u8 *)addr;
+    if (addr < (1ULL << 32))
+        fb = (u8 *)(uintptr_t)addr;
+    else
+        fb = NULL; /* framebuffer above 4GB; use serial/VGA text fallback */
     fast = fbbpp == 32 && rp == 16 && gp == 8 && bp == 0 && rs == 8 && gs == 8 && bs == 8;
     u32 *px = kalloc((u64)sw * sh * 4);
     if (!px) return 0;
@@ -230,6 +234,35 @@ void box(img *c, int x, int y, int w, int h, u32 col) {
 void glyph(img *c, int x, int y, int ch, u32 fg, int bg, int sc) {
     int gw = 8 * sc, gh = 16 * sc;
     if (x >= c->cx1 || y >= c->cy1 || x + gw <= c->cx0 || y + gh <= c->cy0) return;
+    if ((sc == 1 || sc == 2) && ch >= 32 && ch <= 126) {
+        const u8 *g = font_smooth_atlas + (u64)(ch - 32) * 24 * 32;
+        if (bg >= 0) fill(c, x, y, gw, gh, (u32)bg);
+        int x0 = x < c->cx0 ? c->cx0 : x;
+        int y0 = y < c->cy0 ? c->cy0 : y;
+        int x1 = x + gw > c->cx1 ? c->cx1 : x + gw;
+        int y1 = y + gh > c->cy1 ? c->cy1 : y + gh;
+        for (int py = y0; py < y1; py++) {
+            int gy = py - y;
+            int sy0 = gy * 32 / gh, sy1 = (gy + 1) * 32 / gh;
+            u32 *d = c->p + (u64)py * c->w;
+            for (int px = x0; px < x1; px++) {
+                int gx = px - x;
+                int sx0 = gx * 24 / gw, sx1 = (gx + 1) * 24 / gw;
+                int sum = 0, count = 0;
+                for (int sy = sy0; sy < sy1; sy++)
+                    for (int sx = sx0; sx < sx1; sx++) {
+                        sum += g[(u64)sy * 24 + sx];
+                        count++;
+                    }
+                int alpha = count ? (sum + count / 2) / count : 0;
+                alpha = (alpha - 128) * 3 / 2 + 128;
+                if (alpha < 0) alpha = 0;
+                if (alpha > 255) alpha = 255;
+                if (alpha) d[px] = mix(d[px], fg, alpha);
+            }
+        }
+        return;
+    }
     const u8 *g = vga_font_8x16[ch & 255];
     if (sc == 1 && x >= c->cx0 && y >= c->cy0 && x + 8 <= c->cx1 && y + 16 <= c->cy1) {
         for (int r = 0; r < 16; r++) {

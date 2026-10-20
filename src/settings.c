@@ -1,4 +1,5 @@
 #include "tak.h"
+#include "auth.h"
 #include "wm.h"
 #include "vfs.h"
 #include "input.h"
@@ -20,10 +21,81 @@ struct st {
 
 static const char *tabs[] = { "Taskbar", "Wallpaper", "Display", "Keyboard", "About" };
 static const int modes[][2] = { {1920, 1080}, {1600, 900}, {1366, 768}, {1280, 720}, {1024, 768}, {800, 600} };
+static char wallpaper_path[128];
+
+struct saved_settings {
+    char magic[8];
+    u32 version, taskbar, keyboard, width, height;
+    char wallpaper[128];
+};
+
+static int persist_settings(struct st *s) {
+    node *home = auth_home_dir();
+    if (!home) {
+        snprintf(s->msg, sizeof s->msg, "Persistent settings storage unavailable");
+        return -1;
+    }
+    struct saved_settings saved = {0};
+    memcpy(saved.magic, "ASTSET01", 8);
+    saved.version = 1;
+    saved.taskbar = (u32)wm_tbpos_get();
+    saved.keyboard = (u32)kb_layout_get();
+    saved.width = (u32)sw;
+    saved.height = (u32)sh;
+    snprintf(saved.wallpaper, sizeof saved.wallpaper, "%s", wallpaper_path);
+    if (vfs_save(home, ".astros-settings", &saved, sizeof saved) < 0) {
+        snprintf(s->msg, sizeof s->msg, "Settings changed but could not be saved");
+        return -1;
+    }
+    s->msg[0] = 0;
+    return 0;
+}
+
+void settings_restore(void) {
+    node *home = auth_home_dir();
+    if (!home) return;
+    node *file = vfs_child(home, ".astros-settings");
+    if (!file) return;
+    struct saved_settings saved;
+    int wallpaper_terminated = 0;
+    if (!file->dir && file->size == sizeof saved &&
+        vfs_rd(file, 0, &saved, sizeof saved) == (i64)sizeof saved) {
+        for (size_t i = 0; i < sizeof saved.wallpaper; i++)
+            if (!saved.wallpaper[i]) { wallpaper_terminated = 1; break; }
+    }
+    if (file->dir || file->size != sizeof saved ||
+        !wallpaper_terminated ||
+        memcmp(saved.magic, "ASTSET01", 8) || saved.version != 1 ||
+        saved.taskbar > 3 ||
+        (saved.keyboard != LAYOUT_US && saved.keyboard != LAYOUT_ABNT2)) {
+        klog("settings: saved settings are invalid; using defaults\n");
+        return;
+    }
+    wm_tbpos((int)saved.taskbar);
+    kb_layout((int)saved.keyboard);
+    memcpy(wallpaper_path, saved.wallpaper, sizeof wallpaper_path);
+    if (saved.width && saved.height && (saved.width != (u32)sw || saved.height != (u32)sh)) {
+        if (gfx_setmode((int)saved.width, (int)saved.height)) wm_relayout();
+        else klog("settings: saved display mode is unavailable\n");
+    }
+    if (wallpaper_path[0]) {
+        node *image = vfs_find(wallpaper_path, NULL);
+        img *loaded = image && !image->dir ? img_load(image) : NULL;
+        if (loaded) {
+            wm_wallpaper(loaded);
+            img_free(loaded);
+        } else klog("settings: saved wallpaper is unavailable\n");
+    }
+}
 
 static void hb(struct st *s, img *c, int x, int y, int w, int h, const char *t, int id, int on) {
-    ui_btn(c, x, y, w, h, t, s->hov == id ? 1 : 0);
-    if (on) box(c, x, y, w, h, C_LRED), box(c, x + 1, y + 1, w - 2, h - 2, C_LRED);
+    int hover = s->hov == id;
+    if (on) {
+        int r = h / 2;
+        if (r > 12) r = 12;
+        fill_rr(c, x, y, w, h, r, C_LRED, 255);
+        ui_btn(c, x + 2, y + 2, w - 4, h - 4, t, hover ? 1 : 0);
+    } else ui_btn(c, x, y, w, h, t, hover ? 1 : 0);
     if (s->nhot < 48) s->hot[s->nhot++] = (struct hot){ x, y, w, h, id };
 }
 
@@ -85,8 +157,7 @@ static void draw(win *w) {
         } else {
             text(c, x, y + 96, "This adapter has no native mode switching in Astros.", C_TEXT);
             text(c, x, y + 118, "The resolution is chosen by the bootloader (GRUB)", C_DIM);
-            text(c, x, y + 136, "and uses the framebuffer it hands to the
-                 kernel.", C_DIM);
+            text(c, x, y + 136, "and uses the framebuffer it hands to the kernel.", C_DIM);
         }
     } else if (s->tab == 3) {
         text2(c, x, y, "Keyboard", C_WHITE);
@@ -114,8 +185,8 @@ static void act(win *w, int id) {
     struct st *s = w->priv;
     s->msg[0] = 0;
     if (id >= 1 && id <= 5) s->tab = id - 1;
-    else if (id >= 100 && id <= 103) wm_tbpos(id - 100);
-    else if (id == 110) wm_wallpaper(NULL);
+    else if (id >= 100 && id <= 103) { wm_tbpos(id - 100); persist_settings(s); }
+    else if (id == 110) { wallpaper_path[0] = 0; wm_wallpaper(NULL); persist_settings(s); }
     else if (id >= 111 && id < 120) {
         node *d = vfs_find("/pictures", NULL);
         int row = 0;
@@ -123,17 +194,22 @@ static void act(win *w, int id) {
             if (k->dir || !is_img(k->name)) continue;
             if (row++ == id - 111) {
                 img *i = img_load(k);
-                if (i) { wm_wallpaper(i); img_free(i); }
+                if (i) {
+                    vfs_path(k, wallpaper_path, sizeof wallpaper_path);
+                    wm_wallpaper(i);
+                    img_free(i);
+                    persist_settings(s);
+                }
                 else snprintf(s->msg, sizeof s->msg, "Could not decode %s", k->name);
                 break;
             }
         }
     } else if (id >= 120 && id < 126) {
         int i = id - 120;
-        if (gfx_setmode(modes[i][0], modes[i][1])) wm_relayout();
+        if (gfx_setmode(modes[i][0], modes[i][1])) { wm_relayout(); persist_settings(s); }
         else snprintf(s->msg, sizeof s->msg, "Mode not supported by this adapter");
-    } else if (id == 130) kb_layout(LAYOUT_US);
-    else if (id == 131) kb_layout(LAYOUT_ABNT2);
+    }     else if (id == 130) { kb_layout(LAYOUT_US); persist_settings(s); }
+    else if (id == 131) { kb_layout(LAYOUT_ABNT2); persist_settings(s); }
 }
 
 static void mouse(win *w, int x, int y, int b, int pb, int wheel) {

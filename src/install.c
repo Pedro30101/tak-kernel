@@ -5,6 +5,7 @@
 #include "input.h"
 
 #define PSTART 2048ULL
+#define ESP_SECTORS 262144ULL
 #define PMAXSEC (67108864ULL)
 
 struct inst {
@@ -12,7 +13,7 @@ struct inst {
     int part_mode;
     int manual_mb;
     char msg[96];
-    node *tmp;
+    node *tmp, *esp;
     u64 psize;
     int pct;
     char log[8][80];
@@ -48,28 +49,39 @@ static int do_step(struct inst *s) {
     node *boot, *grub, *efi, *eb;
     switch (s->step) {
     case 0:
-        if (dk->sectors < 409600) { snprintf(s->msg, sizeof s->msg, "Disk is too small (needs 200 MB)"); return -1; }
+        if (dk->sectors < PSTART + ESP_SECTORS + 409600) { snprintf(s->msg, sizeof s->msg, "Disk is too small (needs about 330 MB)"); return -1; }
         if (!kimg_ptr || !initrd_ptr) { snprintf(s->msg, sizeof s->msg, "System files missing in memory"); return -1; }
         if (s->part_mode == 2 && s->manual_mb >= 200) {
             s->psize = (u64)s->manual_mb * 2048ULL;
-            if (s->psize > dk->sectors - PSTART) s->psize = dk->sectors - PSTART;
+            if (s->psize > dk->sectors - PSTART - ESP_SECTORS)
+                s->psize = dk->sectors - PSTART - ESP_SECTORS;
         } else {
-            s->psize = dk->sectors - PSTART;
+            s->psize = dk->sectors - PSTART - ESP_SECTORS;
         }
         if (s->psize > PMAXSEC) s->psize = PMAXSEC;
+        if (s->psize < 409600) { snprintf(s->msg, sizeof s->msg, "BFRUS system volume needs at least 200 MB"); return -1; }
         return 0;
     case 1:
-        if (fat_format(s->disk, PSTART, s->psize, "ASTROS") < 0) { snprintf(s->msg, sizeof s->msg, "Format failed"); return -1; }
+        if (fat_format(s->disk, PSTART, ESP_SECTORS, "ASTROS-BOOT") < 0 ||
+            bfrus_format(s->disk, PSTART + ESP_SECTORS, s->psize, "ASTROS") < 0) {
+            snprintf(s->msg, sizeof s->msg, "Could not format the EFI or BFRUS volume");
+            return -1;
+        }
         return 0;
     case 2:
         s->tmp = kzalloc(sizeof(node));
+        s->esp = kzalloc(sizeof(node));
+        if (!s->tmp || !s->esp) { snprintf(s->msg, sizeof s->msg, "Could not allocate installer mount points"); return -1; }
         s->tmp->dir = 1;
         strcpy(s->tmp->name, "inst");
-        if (!fat_mount(s->disk, PSTART, s->psize, s->tmp)) { snprintf(s->msg, sizeof s->msg, "Could not mount the new volume"); return -1; }
+        s->esp->dir = 1;
+        strcpy(s->esp->name, "esp");
+        if (!bfrus_mount(s->disk, PSTART + ESP_SECTORS, s->psize, s->tmp)) { snprintf(s->msg, sizeof s->msg, "Could not mount the BFRUS volume"); return -1; }
+        if (!fat_mount(s->disk, PSTART, ESP_SECTORS, s->esp)) { snprintf(s->msg, sizeof s->msg, "Could not mount the EFI volume"); return -1; }
         boot = sub(s->tmp, "boot");
         if (!boot || !sub(boot, "grub")) { snprintf(s->msg, sizeof s->msg, "Could not create /boot"); return -1; }
-        efi = sub(s->tmp, "EFI");
-        if (efi) sub(efi, "BOOT");
+        efi = sub(s->esp, "EFI");
+        if (!efi || !sub(efi, "BOOT")) { snprintf(s->msg, sizeof s->msg, "Could not create the EFI boot directory"); return -1; }
         return 0;
     case 3:
         return put(s, vfs_child(s->tmp, "boot"), "kernel.elf", kimg_ptr, kimg_len);
@@ -80,7 +92,7 @@ static int do_step(struct inst *s) {
             "set timeout=1\n"
             "set default=0\n"
             "insmod all_video\n"
-            "set gfxmode=auto\n"
+            "set gfxmode=2560x1440,1920x1080,1600x900,1366x768,1280x720,1024x768,800x600,auto\n"
             "set gfxpayload=keep\n"
             "\n"
             "menuentry \"Astros\" {\n"
@@ -96,7 +108,7 @@ static int do_step(struct inst *s) {
         if (!src) { logm(s, "No UEFI loader in this build, skipped"); return 0; }
         u64 n;
         u8 *b = vfs_slurp(src, &n);
-        eb = vfs_child(vfs_child(s->tmp, "EFI"), "BOOT");
+        eb = vfs_child(vfs_child(s->esp, "EFI"), "BOOT");
         int r = b && eb ? put(s, eb, "BOOTX64.EFI", b, n) : -1;
         kfree(b);
         return r;
@@ -135,12 +147,19 @@ static int do_step(struct inst *s) {
         e[0] = 0x80; e[1] = 0xFE; e[2] = 0xFF; e[3] = 0xFF;
         e[4] = 0x0C; e[5] = 0xFE; e[6] = 0xFF; e[7] = 0xFF;
         *(u32 *)(e + 8) = (u32)PSTART;
+        *(u32 *)(e + 12) = (u32)ESP_SECTORS;
+        e += 16;
+        e[1] = 0xFE; e[2] = 0xFF; e[3] = 0xFF;
+        e[4] = 0xDA; e[5] = 0xFE; e[6] = 0xFF; e[7] = 0xFF;
+        *(u32 *)(e + 8) = (u32)(PSTART + ESP_SECTORS);
         *(u32 *)(e + 12) = (u32)s->psize;
         m[510] = 0x55; m[511] = 0xAA;
         if (disk_write(s->disk, 0, 1, m) < 0) { snprintf(s->msg, sizeof s->msg, "Could not write the MBR"); return -1; }
         inst_have_mbr = 0;
         kfree(s->tmp);
+        kfree(s->esp);
         s->tmp = NULL;
+        s->esp = NULL;
         return 0;
     }
     }
@@ -217,8 +236,8 @@ static void draw(win *w) {
         };
         const char *descs[3] = {
             "Wipes whole drive and puts Tak as main OS. No dual-booting.",
-            "Sets up standard boot and main partition automatically.",
-            "Customize the size of the Astros root partition manually."
+            "Creates a FAT32 boot partition and BFRUS storage automatically.",
+            "Customize the size of the BFRUS system and data volume."
         };
 
         for (int i = 0; i < 3; i++) {
@@ -231,7 +250,7 @@ static void draw(win *w) {
 
         if (s->part_mode == 2) {
             char mb[48];
-            snprintf(mb, sizeof mb, "Root Size: %d MB", s->manual_mb);
+            snprintf(mb, sizeof mb, "BFRUS Size: %d MB", s->manual_mb);
             text(c, 40, y + 256, mb, C_YELLOW);
             ui_btn(c, 230, y + 250, 80, 28, "- 100MB", 0);
             ui_btn(c, 320, y + 250, 80, 28, "+ 100MB", 0);
@@ -249,11 +268,11 @@ static void draw(win *w) {
             text(c, 24, y + 90, "Drive will be fully allocated to Astros with GRUB bootloader.", C_DIM);
         } else if (s->part_mode == 1) {
             text(c, 24, y + 70, "Mode: Automatic Partitioning (Standard system volume)", C_TEXT);
-            text(c, 24, y + 90, "Standard partition scheme with FAT32 root volume.", C_DIM);
+            text(c, 24, y + 90, "128 MB FAT32 boot partition plus BFRUS system/data volume.", C_DIM);
         } else {
-            snprintf(b, sizeof b, "Mode: Manual Partitioning (Root volume: %d MB)", s->manual_mb);
+            snprintf(b, sizeof b, "Mode: Manual Partitioning (BFRUS volume: %d MB)", s->manual_mb);
             text(c, 24, y + 70, b, C_TEXT);
-            text(c, 24, y + 90, "Custom partition size selected.", C_DIM);
+            text(c, 24, y + 90, "Custom BFRUS system/data size; the FAT32 boot partition is fixed.", C_DIM);
         }
 
         ui_btn(c, 24, w->h - 56, 100, 34, "Back", 0);
@@ -263,9 +282,9 @@ static void draw(win *w) {
         fill(c, 24, y + 50, w->w - 48, 22, 0x0B1020);
         box(c, 24, y + 50, w->w - 48, 22, C_RED);
         fill(c, 26, y + 52, (w->w - 52) * s->pct / 100, 18, s->err ? C_LRED : C_GREEN);
-        if (s->err) text(c, 24, y + 86, s->msg, C_LRED);
-        else if (s->step < NSTEP) { snprintf(b, sizeof b, "%s...", steps[s->step]); text(c, 24, y + 86, b, C_TEXT); }
-        for (int i = 0; i < s->nlog; i++) text(c, 24, y + 112 + i * 18, s->log[i], C_DIM);
+        if (s->err) text(c, 24, y + 200, s->msg, C_LRED);
+        else if (s->step < NSTEP) { snprintf(b, sizeof b, "%s...", steps[s->step]); text(c, 24, y + 200, b, C_TEXT); }
+        for (int i = 0; i < s->nlog; i++) text(c, 24, y + 220 + i * 18, s->log[i], C_DIM);
         if (s->err) ui_btn(c, 24, w->h - 56, 100, 34, "Back", 0);
     } else {
         text2(c, 24, y, "All done", C_GREEN);

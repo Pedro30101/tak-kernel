@@ -10,7 +10,7 @@
 #define VGA_COLOR(fg, bg) ((uint8_t)((bg) << 4 | (fg)))
 #define VGA_ENTRY(ch, color) ((uint16_t)(uint8_t)(ch) | (uint16_t)(color) << 8)
 #define COMMAND_MAX 128
-static const char TAK_VERSION[] = "0.9.6b";
+static const char TAK_VERSION[] = "0.9.6b (0.9.6 Beta)";
 
 _Static_assert(sizeof(void *) == 8, "TAK must be compiled for x86_64");
 
@@ -962,7 +962,6 @@ void kernel_main(uint64_t multiboot_magic, uint64_t multiboot_info) {
     }
     shell_loop();
 }
-
 
 
 

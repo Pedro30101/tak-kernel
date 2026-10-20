@@ -1,4 +1,5 @@
 #include "tak.h"
+#include "auth.h"
 #include "wm.h"
 #include "vfs.h"
 #include "input.h"
@@ -46,7 +47,7 @@ static u32 icol(node *n) {
 }
 
 static const struct { const char *name, *path; } places[] = {
-    { "Home", "/home" }, { "Apps", "/apps" }, { "Pictures", "/pictures" },
+    { "Home", NULL }, { "Apps", "/apps" }, { "Pictures", "/pictures" },
     { "Music", "/music" }, { "Disk", "/disk" }, { "Root", "/" }
 };
 
@@ -69,7 +70,7 @@ static void draw(win *w) {
     fill(c, 0, TOP, SIDE, w->h - TOP, 0x0F172A);
     int py = TOP + 8;
     for (int i = 0; i < 6; i++) {
-        node *pn = vfs_find(places[i].path, NULL);
+        node *pn = places[i].path ? vfs_find(places[i].path, NULL) : auth_home_dir();
         if (!pn) continue;
         if (pn == f->cwd) fill(c, 0, py - 4, SIDE, 28, C_DRED);
         text(c, 14, py, places[i].name, C_TEXT);
@@ -259,7 +260,7 @@ static void mouse(win *w, int x, int y, int b, int pb, int wheel) {
     if (x < SIDE) {
         int py = TOP + 8;
         for (int i = 0; i < 6; i++) {
-            node *pn = vfs_find(places[i].path, NULL);
+            node *pn = places[i].path ? vfs_find(places[i].path, NULL) : auth_home_dir();
             if (!pn) continue;
             if (y >= py - 4 && y < py + 24) { go(w, pn); return; }
             py += 30;
@@ -289,7 +290,7 @@ win *files_open(const char *arg) {
     w->icol = 0xF59E0B;
     f->sel = -1;
     f->hov = -1;
-    f->cwd = vfs_find(arg && *arg ? arg : "/home", NULL);
+    f->cwd = arg && *arg ? vfs_find(arg, NULL) : auth_home_dir();
     if (!f->cwd || !f->cwd->dir) f->cwd = vroot;
     refresh(f);
     char p[160];

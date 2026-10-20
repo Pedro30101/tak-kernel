@@ -1,4 +1,5 @@
 #include "tak.h"
+#include "auth.h"
 #include "wm.h"
 #include "vfs.h"
 #include "input.h"
@@ -125,7 +126,19 @@ static void save_to(win *w, const char *path) {
 static void do_save(win *w) {
     struct ed *e = w->priv;
     if (e->path[0]) save_to(w, e->path);
-    else { e->pmode = 1; snprintf(e->pbuf, sizeof e->pbuf, "/home/untitled.txt"); e->plen = (int)strlen(e->pbuf); }
+    else {
+        node *home = auth_home_dir();
+        if (!home) snprintf(e->msg, sizeof e->msg, "Persistent home folder unavailable");
+        else {
+            vfs_path(home, e->pbuf, sizeof e->pbuf);
+            size_t n = strlen(e->pbuf);
+            if (n + sizeof "/untitled.txt" <= sizeof e->pbuf) {
+                memcpy(e->pbuf + n, "/untitled.txt", sizeof "/untitled.txt");
+                e->plen = (int)strlen(e->pbuf);
+                e->pmode = 1;
+            } else snprintf(e->msg, sizeof e->msg, "Home path is too long");
+        }
+    }
     draw(w);
 }
 
@@ -210,7 +223,19 @@ static void mouse(win *w, int x, int y, int b, int pb, int wheel) {
     if (!(b & 1) || (pb & 1)) return;
     if (y < BAR) {
         if (inside(x, y, 6, 4, 60, 26)) do_save(w);
-        else if (inside(x, y, 72, 4, 80, 26)) { e->pmode = 1; snprintf(e->pbuf, sizeof e->pbuf, "%s", e->path[0] ? e->path : "/home/untitled.txt"); e->plen = (int)strlen(e->pbuf); draw(w); }
+        else if (inside(x, y, 72, 4, 80, 26)) {
+            e->pmode = 1;
+            if (e->path[0]) snprintf(e->pbuf, sizeof e->pbuf, "%s", e->path);
+            else {
+                node *home = auth_home_dir();
+                if (!home) { e->pmode = 0; snprintf(e->msg, sizeof e->msg, "Persistent home folder unavailable"); draw(w); return; }
+                vfs_path(home, e->pbuf, sizeof e->pbuf);
+                size_t n = strlen(e->pbuf);
+                if (n + sizeof "/untitled.txt" <= sizeof e->pbuf) memcpy(e->pbuf + n, "/untitled.txt", sizeof "/untitled.txt");
+            }
+            e->plen = (int)strlen(e->pbuf);
+            draw(w);
+        }
         return;
     }
     if (x < GUT || y >= w->h - STAT) return;

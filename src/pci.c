@@ -20,3 +20,13 @@ void pci_w32(u8 b, u8 d, u8 f, u8 o, u32 v) {
     outl(0xCF8, addr(b, d, f, o));
     outl(0xCFC, v);
 }
+
+int pci_map_uncached(u64 address) {
+    extern u64 page_directory[];
+    if (address >= 0x100000000ULL) return 0;
+    u64 entry = address >> 21;
+    if (entry >= 2048) return 0;
+    page_directory[entry] |= 0x18;
+    __asm__ volatile("invlpg (%0)" : : "r"((uintptr_t)address) : "memory");
+    return 1;
+}

@@ -9,11 +9,13 @@
 #define FIELD_CONFIRM 2
 #define LOGIN_COOLDOWN (30ULL * 100)
 
+void settings_restore(void);
+
 struct field_rect { int x, y, w, h; };
 struct login_state {
     int mode, focus, failures;
     u64 blocked_until;
-    char username[32], password[65], confirm[65], message[96];
+    char username[32], password[10000], confirm[10000], message[96];
     struct field_rect fields[3], submit, power;
 };
 
@@ -29,12 +31,10 @@ static void field(img *c, struct login_state *s, int id, int x, int y, int width
     fill_rr(c, x, y + 18, width, 36, 8, 0x0D1421, 255);
     box(c, x, y + 18, width, 36, active ? C_LRED : 0x3B465A);
     if (secret) {
-        char mask[65];
         size_t n = strlen(value);
-        memset(mask, '*', n);
-        mask[n] = 0;
-        text(c, x + 12, y + 28, mask, C_TEXT);
-        auth_wipe(mask, sizeof mask);
+        int visible = (width - 24) / 8;
+        if (visible > 0 && n > (size_t)visible) n = (size_t)visible;
+        for (size_t i = 0; i < n; i++) glyph(c, x + 12 + (int)i * 8, y + 28, '*', C_TEXT, -1, 1);
     } else {
         text(c, x + 12, y + 28, value[0] ? value : "Type a username", value[0] ? C_TEXT : C_DIM);
     }
@@ -76,7 +76,7 @@ static void draw(win *w) {
         field(c, s, FIELD_CONFIRM, x + 32, y + 304, fw, "Confirm password", s->confirm, 1, s->focus == FIELD_CONFIRM);
         s->submit = (struct field_rect){ x + 32, y + ch - 104, fw, 42 };
         ui_btn(c, s->submit.x, s->submit.y, s->submit.w, s->submit.h, "Create account", 0);
-        text(c, x + 32, y + ch - 48, "Use at least 12 characters. Password input is hidden.", C_DIM);
+        text(c, x + 32, y + ch - 48, "Password: 3-9999 characters. Input is hidden.", C_DIM);
         s->power = (struct field_rect){ 0, 0, 0, 0 };
     } else {
         text2(c, x + 32, y + 96, "Welcome back", C_WHITE);
@@ -97,6 +97,12 @@ static void draw(win *w) {
 
 static void finish_login(win *w) {
     struct login_state *s = w->priv;
+    if (!auth_home_dir()) {
+        snprintf(s->message, sizeof s->message, "Could not open this user's persistent home folder.");
+        draw(w);
+        return;
+    }
+    settings_restore();
     auth_wipe(s->password, sizeof s->password);
     auth_wipe(s->confirm, sizeof s->confirm);
     wm_session_unlock(w);
@@ -197,7 +203,7 @@ static void key(win *w, int k, int mod) {
     if (k < 0x20 || k > 0x7E || s->mode == LOGIN_STORAGE_ERROR) return;
     char *dst = s->focus == FIELD_NAME ? s->username :
                 s->focus == FIELD_PASSWORD ? s->password : s->confirm;
-    size_t n = strlen(dst), cap = s->focus == FIELD_NAME ? sizeof s->username - 1 : 64;
+    size_t n = strlen(dst), cap = s->focus == FIELD_NAME ? sizeof s->username - 1 : sizeof s->password - 1;
     if (n >= cap) return;
     if (s->focus == FIELD_NAME) {
         int valid = (k >= 'a' && k <= 'z') || (k >= 'A' && k <= 'Z') ||

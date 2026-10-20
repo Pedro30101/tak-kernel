@@ -31,6 +31,11 @@ struct fat *fat_mount(int d, u64 start, u64 size, node *at);
 int fat_format(int d, u64 start, u64 size, const char *label);
 extern struct fat *fat_main;
 
+struct bfrus;
+struct bfrus *bfrus_mount(int d, u64 start, u64 size, node *at);
+int bfrus_format(int d, u64 start, u64 size, const char *label);
+extern struct bfrus *bfrus_main;
+
 extern u8 *initrd_ptr;
 extern u64 initrd_len;
 extern u8 *kimg_ptr;

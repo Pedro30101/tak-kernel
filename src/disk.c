@@ -107,6 +107,7 @@ int disk_parts(int d, struct part *out, int max) {
 }
 
 struct fat *fat_main;
+struct bfrus *bfrus_main;
 u8 *initrd_ptr, *kimg_ptr;
 u64 initrd_len, kimg_len;
 
@@ -117,6 +118,18 @@ void disk_init(void) {
     }
     if (!ndisks) return;
     node *at = NULL;
+    for (int d = 0; d < ndisks && !bfrus_main; d++) {
+        struct part p[4];
+        int n = disk_parts(d, p, 4);
+        for (int i = 0; i < n && !bfrus_main; i++) {
+            if (p[i].type != 0xDA) continue;
+            if (!at) at = vfs_mk(vroot, "disk", 1);
+            if (!at) break;
+            bfrus_main = bfrus_mount(d, p[i].start, p[i].size, at);
+        }
+    }
+    if (bfrus_main) return;
+    at = NULL;
     for (int d = 0; d < ndisks && !fat_main; d++) {
         struct part p[4];
         int n = disk_parts(d, p, 4);

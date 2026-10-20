@@ -13,7 +13,7 @@ typedef int16_t i16;
 typedef int32_t i32;
 typedef int64_t i64;
 
-#define VER "0.5.9"
+#define VER "0.9.6b (0.9.6 Beta)"
 
 static inline u8 inb(u16 p) { u8 v; __asm__ volatile("inb %1,%0" : "=a"(v) : "Nd"(p)); return v; }
 static inline u16 inw(u16 p) { u16 v; __asm__ volatile("inw %1,%0" : "=a"(v) : "Nd"(p)); return v; }

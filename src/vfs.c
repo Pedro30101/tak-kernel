@@ -150,6 +150,7 @@ u8 *vfs_slurp(node *n, u64 *size) {
 }
 
 int vfs_save(node *dir, const char *name, const void *data, u64 len) {
+    if (!dir || !dir->dir || !name || !*name || (!data && len)) return -1;
     node *f = vfs_child(dir, name);
     if (!f) f = vfs_mk(dir, name, 0);
     if (!f) return -1;
@@ -157,7 +158,7 @@ int vfs_save(node *dir, const char *name, const void *data, u64 len) {
     else if (f->ops->write) {
         f->size = 0;
     }
-    return vfs_wr(f, 0, data, len) < 0 ? -1 : 0;
+    return vfs_wr(f, 0, data, len) == (i64)len ? 0 : -1;
 }
 
 static u64 oct(const char *s, int n) {

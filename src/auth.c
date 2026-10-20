@@ -5,6 +5,8 @@
 #define AUTH_ITERATIONS 100000u
 #define AUTH_SALT_SIZE 16
 #define AUTH_HASH_SIZE 32
+#define AUTH_MIN_PASSWORD 3
+#define AUTH_MAX_PASSWORD 9999
 #define AUTH_PATH "/disk"
 #define AUTH_FILE ".astros-auth"
 
@@ -138,21 +140,33 @@ static void hmac_sha256(const u8 *key, size_t key_len, const u8 *data, size_t da
 
 static void derive(const char *password, const u8 salt[AUTH_SALT_SIZE], u32 rounds, u8 out[AUTH_HASH_SIZE]) {
     u8 input[AUTH_SALT_SIZE + 4], u[AUTH_HASH_SIZE], acc[AUTH_HASH_SIZE];
+    u8 password_key[AUTH_HASH_SIZE];
+    const u8 *key = (const u8 *)password;
+    size_t key_len = strlen(password);
+    if (key_len > 64) {
+        struct sha256 s;
+        sha_init(&s);
+        sha_update(&s, password, key_len);
+        sha_final(&s, password_key);
+        key = password_key;
+        key_len = sizeof password_key;
+    }
     memcpy(input, salt, AUTH_SALT_SIZE);
     input[AUTH_SALT_SIZE] = 0;
     input[AUTH_SALT_SIZE + 1] = 0;
     input[AUTH_SALT_SIZE + 2] = 0;
     input[AUTH_SALT_SIZE + 3] = 1;
-    hmac_sha256((const u8 *)password, strlen(password), input, sizeof input, u);
+    hmac_sha256(key, key_len, input, sizeof input, u);
     memcpy(acc, u, sizeof acc);
     for (u32 i = 1; i < rounds; i++) {
-        hmac_sha256((const u8 *)password, strlen(password), u, sizeof u, u);
+        hmac_sha256(key, key_len, u, sizeof u, u);
         for (int j = 0; j < AUTH_HASH_SIZE; j++) acc[j] ^= u[j];
     }
     memcpy(out, acc, sizeof acc);
     auth_wipe(input, sizeof input);
     auth_wipe(u, sizeof u);
     auth_wipe(acc, sizeof acc);
+    auth_wipe(password_key, sizeof password_key);
 }
 
 static int random_bytes(u8 *out, size_t len) {
@@ -202,7 +216,7 @@ static int valid_username(const char *name) {
 
 static int valid_password(const char *password) {
     size_t n = strlen(password);
-    if (n < 12 || n > 64) return 0;
+    if (n < AUTH_MIN_PASSWORD || n > AUTH_MAX_PASSWORD) return 0;
     for (size_t i = 0; i < n; i++)
         if ((u8)password[i] < 0x20 || (u8)password[i] > 0x7E) return 0;
     return 1;
@@ -289,4 +303,16 @@ int auth_verify(const char *username, const char *password) {
 void auth_username(char *out, size_t cap) {
     if (!out || !cap) return;
     snprintf(out, cap, "%s", current_state == AUTH_LOGIN ? current.username : "");
+}
+
+node *auth_home_dir(void) {
+    if (current_state != AUTH_LOGIN) return vfs_find("/home", NULL);
+    node *disk = vfs_find(AUTH_PATH, NULL);
+    if (!disk || !disk->dir || !disk->ops) return NULL;
+    node *home = vfs_child(disk, "home");
+    if (!home) home = vfs_mk(disk, "home", 1);
+    if (!home || !home->dir) return NULL;
+    node *user = vfs_child(home, current.username);
+    if (!user) user = vfs_mk(home, current.username, 1);
+    return user && user->dir ? user : NULL;
 }

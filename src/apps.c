@@ -102,7 +102,11 @@ void open_file(node *n) {
     vfs_path(n, p, sizeof p);
     const char *e = ext_of(n->name);
     if (n->dir) { app_open("Files", p); return; }
-    if (!strcasecmp(e, "te")) { proc_spawn(p, NULL, NULL); return; }
+    u8 magic[4];
+    int elf = vfs_rd(n, 0, magic, sizeof magic) == sizeof magic &&
+              magic[0] == 0x7F && magic[1] == 'E' &&
+              magic[2] == 'L' && magic[3] == 'F';
+    if (!strcasecmp(e, "te") || elf) { proc_spawn(p, NULL, NULL); return; }
     if (!strcasecmp(e, "png") || !strcasecmp(e, "jpg") || !strcasecmp(e, "jpeg") ||
         !strcasecmp(e, "bmp") || !strcasecmp(e, "webp") || !strcasecmp(e, "svg")) {
         app_open("Image Viewer", p); return;

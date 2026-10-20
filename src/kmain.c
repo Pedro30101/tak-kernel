@@ -7,6 +7,8 @@
 #include "gfx.h"
 #include "disk.h"
 #include "login.h"
+#include "net.h"
+#include "netstack.h"
 
 int live;
 void apps_boot(void);
@@ -17,6 +19,11 @@ int audio_init(void);
 static int has_live(const char *s) {
     for (; *s; s++) if (!strncmp(s, "live", 4)) return 1;
     return 0;
+}
+
+static void vga_text_mode(void) {
+    /* Switch VGA to 80x25 text mode (mode 0x03) so vga_msg is readable. */
+    __asm__ volatile ("int $0x10" : : "a"(0x0003));
 }
 
 static void vga_msg(const char *m) {
@@ -44,6 +51,7 @@ void kmain(u64 magic, u64 info) {
         if (!strncmp(nm, "kimg", 4)) { kimg_ptr = (u8 *)ms; kimg_len = me - ms; }
     }
     if (!gfx_init()) {
+        vga_text_mode();
         vga_msg("Astros needs a graphical framebuffer from GRUB. Boot again and do not force text mode.");
         for (;;) __asm__ volatile("hlt");
     }
@@ -52,6 +60,8 @@ void kmain(u64 magic, u64 info) {
     gpu_init();
     audio_init();
     disk_init();
+    net_init();
+    net_stack_init();
     wm_init();
     sti();
     if (live) apps_boot();
