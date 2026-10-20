@@ -1,0 +1,129 @@
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+void *kalloc(size_t size) { return malloc(size); }
+void kfree(void *ptr) { free(ptr); }
+void *kzalloc(size_t size) { return calloc(1, size); }
+
+#include "../src/bfrus.c"
+
+static u8 disk_img[64 * 1024 * 1024];
+static int fake_disk = 0;
+int disk_read(int d, u64 lba, u32 n, void *buf) {
+    if (d != fake_disk) return -1;
+    if (lba + n > 64 * 1024 * 1024 / 512) return -1;
+    memcpy(buf, disk_img + lba * 512, n * 512);
+    return 0;
+}
+int disk_write(int d, u64 lba, u32 n, const void *buf) {
+    if (d != fake_disk) return -1;
+    if (lba + n > 64 * 1024 * 1024 / 512) return -1;
+    memcpy(disk_img + lba * 512, buf, n * 512);
+    return 0;
+}
+int rtc_get(int *h, int *m, int *s, int *dd, int *mo, int *y) {
+    *h = 12; *m = 0; *s = 0; *dd = 1; *mo = 1; *y = 2026;
+    return 0;
+}
+
+node *vfs_add(node *dir, const char *name, int isdir) {
+    node *n = calloc(1, sizeof(node));
+    if (!n) return NULL;
+    strncpy(n->name, name, 63);
+    n->name[63] = 0;
+    n->dir = isdir;
+    n->par = dir;
+    node **pp = &dir->kid;
+    while (*pp) pp = &(*pp)->nxt;
+    *pp = n;
+    return n;
+}
+
+int main(void) {
+    fake_disk = 0;
+
+    if (bfrus_format(0, 0, 16 * 1024 * 1024 / 512, "TESTVOL") < 0) {
+        printf("FAIL: bfrus_format\n");
+        return 1;
+    }
+    printf("PASS: bfrus_format\n");
+
+    node root = {0};
+    root.dir = 1;
+    root.priv = 1;
+    root.fs = NULL;
+
+    struct bfrus *fs = bfrus_mount(0, 0, 16 * 1024 * 1024 / 512, &root);
+    if (!fs) {
+        printf("FAIL: bfrus_mount\n");
+        return 1;
+    }
+    printf("PASS: bfrus_mount\n");
+
+    node f = {0};
+    f.priv = 2;
+    f.fs = fs;
+    const char *msg = "Hello, BFRUS persistence test!";
+    if (bfrus_file_write(&f, 0, msg, strlen(msg)) < 0) {
+        printf("FAIL: bfrus_file_write\n");
+        return 1;
+    }
+    f.size = strlen(msg);
+    printf("PASS: wrote '%s' (%zu bytes)\n", msg, strlen(msg));
+
+    kfree(fs->bitmap);
+    kfree(fs);
+    root.kid = NULL;
+    root.loaded = 0;
+
+    struct bfrus *fs2 = bfrus_mount(0, 0, 16 * 1024 * 1024 / 512, &root);
+    if (!fs2) {
+        printf("FAIL: bfrus_mount remount\n");
+        return 1;
+    }
+    printf("PASS: remount\n");
+
+    node f2 = {0};
+    f2.priv = 2;
+    f2.fs = fs2;
+    u8 read_buf[256];
+    i64 r = bfrus_file_read(&f2, 0, read_buf, sizeof(read_buf));
+    if (r < 0) {
+        printf("FAIL: bfrus_file_read\n");
+        return 1;
+    }
+    read_buf[r] = 0;
+    if (strcmp((char *)read_buf, msg) != 0) {
+        printf("FAIL: data mismatch: '%s' != '%s'\n", read_buf, msg);
+        return 1;
+    }
+    printf("PASS: read back '%s' (%ld bytes)\n", read_buf, r);
+
+    kfree(fs2->bitmap);
+    kfree(fs2);
+    root.kid = NULL;
+    root.loaded = 0;
+
+    struct bfrus *fs3 = bfrus_mount(0, 0, 16 * 1024 * 1024 / 512, &root);
+    if (!fs3) {
+        printf("FAIL: second remount\n");
+        return 1;
+    }
+    printf("PASS: second remount\n");
+
+    node f2a = {0};
+    f2a.priv = 2;
+    f2a.fs = fs3;
+    r = bfrus_file_read(&f2a, 0, read_buf, sizeof(read_buf));
+    if (r < 0 || strcmp((char *)read_buf, msg) != 0) {
+        printf("FAIL: hello.txt corrupted after remount\n");
+        return 1;
+    }
+    printf("PASS: hello.txt intact after remount\n");
+
+    kfree(fs3->bitmap);
+    kfree(fs3);
+    printf("\nAll BFRUS persistence tests passed.\n");
+    return 0;
+}
