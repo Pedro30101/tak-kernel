@@ -6,6 +6,8 @@ This is also a stripped down 0.9.6b version of the kernel, and alot of stuff i h
 
 **Anything about the tests folder (which was deleted) is because we used AI to test some tiny stuff when we didn't have access to our computers, so AI would generate those kinds of test scripts and use them. We and You don't need those scripts for anything, they were useless**
 
+**(The scripts and everything is fully coded by human, of course i used AI to help me a bit, but everything is written by hand, and not really commented, only some scripts have comments in them, that i put on because i sometimes don't like reading my own code when its REALLY complicated)**
+
 **Astros** is the graphical desktop environment built into the TAK Kernel. This repository contains an experimental x86-64 operating-system project that boots through GRUB/Multiboot2, loads its initial files from an initramfs, and starts either the live desktop or the installed-system login screen.
 
 > **Project status:** experimental, very broken and unfinished. It is for development and testing, not for storing sensitive data or use as a secure, production operating system.
