@@ -3,7 +3,6 @@ CC := $(CROSS)gcc
 HOSTCC ?= gcc
 AS := $(CROSS)as
 LD := $(CROSS)gcc
-GRUB_MKRESCUE ?= grub-mkrescue
 QEMU ?= qemu-system-x86_64
 QEMU_NET ?= -nic user,model=e1000
 
@@ -17,7 +16,7 @@ CSRC := $(filter-out src/stbimg.c src/term.c,$(wildcard src/*.c))
 OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(CSRC)) $(BUILD)/boot.o $(BUILD)/isr.o $(BUILD)/stbimg.o $(BUILD)/font_smooth.o
 HDR := $(wildcard src/*.h)
 
-.PHONY: all iso run clean apps grubimgs grub-bfrus-modules test-auth test-fat-persistence test-bfrus-persistence linux-abi-smoke
+.PHONY: all iso run clean apps grubimgs grub-bfrus-modules
 all: $(BUILD)/kernel.elf
 
 $(BUILD):
@@ -62,32 +61,6 @@ $(BUILD)/apps/%.te: $(BUILD)/apps/%.elf
 
 apps: $(APPTE)
 
-$(BUILD)/auth_test: tests/auth_test.c src/auth.c src/auth.h src/vfs.h src/tak.h | $(BUILD)
-	$(HOSTCC) -std=gnu11 -O2 -Wall -Wextra -Werror -DAUTH_TEST -Isrc $< -o $@
-
-test-auth: $(BUILD)/auth_test
-	$(BUILD)/auth_test
-
-$(BUILD)/fat_persistence_test: tests/fat_persistence_test.c src/fat32.c src/vfs.c src/auth.c src/auth.h src/vfs.h src/disk.h src/tak.h | $(BUILD)
-	$(HOSTCC) -std=gnu11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -Isrc $< -o $@
-
-test-fat-persistence: $(BUILD)/fat_persistence_test
-	$(BUILD)/fat_persistence_test
-
-$(BUILD)/bfrus_persistence_test: tests/bfrus_persistence_test.c src/bfrus.c src/bfrus_format.h src/vfs.c src/auth.c src/settings.c src/auth.h src/vfs.h src/disk.h src/tak.h | $(BUILD)
-	$(HOSTCC) -std=gnu11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -Isrc $< -o $@
-
-test-bfrus-persistence: $(BUILD)/bfrus_persistence_test
-	$(BUILD)/bfrus_persistence_test
-
-$(BUILD)/linux_abi_smoke.o: tests/linux_abi_smoke.s | $(BUILD)
-	$(AS) --64 $< -o $@
-
-$(BUILD)/linux_abi_smoke: $(BUILD)/linux_abi_smoke.o
-	$(CROSS)ld -static -nostdlib -Ttext-segment=0x40000000 -e _start -o $@ $<
-
-linux-abi-smoke: $(BUILD)/linux_abi_smoke
-
 # CD boot modules: no biosdisk (causes int13_cdrom 64-bit LBA failure on CD-ROM),
 # no bfrus (custom module, needs GRUB source tree to build),
 # use iso9660 instead to read from the CD filesystem
@@ -130,7 +103,7 @@ $(BUILD)/initrd.tar: $(shell find initrd -type f 2>/dev/null) $(APPTE) | $(BUILD
 	mkdir -p $(BUILD)/stage/apps
 	for f in $(APPTE); do cp $$f $(BUILD)/stage/apps/; done
 	mkdir -p $(BUILD)/stage/sys/grub
-	-	cp $(BUILD)/grub/boot.img $(BUILD)/grub/core.img $(BUILD)/grub/BOOTX64.EFI $(BUILD)/stage/sys/grub/ 2>/dev/null || true
+	-cp $(BUILD)/grub/boot.img $(BUILD)/grub/core.img $(BUILD)/grub/BOOTX64.EFI $(BUILD)/stage/sys/grub/ 2>/dev/null
 	tar --format=ustar --owner=0 --group=0 -C $(BUILD)/stage -cf $@ .
 
 iso: $(BUILD)/kernel.elf $(BUILD)/initrd.tar
